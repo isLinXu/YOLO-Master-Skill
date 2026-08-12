@@ -1,0 +1,90 @@
+{
+  "cases": [
+    {
+      "name": "pipeline_dry_run",
+      "suite": "dry-run",
+      "request": {
+        "skill": "yolo.pipeline.experiment",
+        "inputs": {
+          "model": "ultralytics/cfg/models/master/v0_1/det/yolo-master-n.yaml",
+          "task": "detect",
+          "data": "coco8.yaml"
+        },
+        "params": {
+          "train": {
+            "epochs": 1,
+            "imgsz": 32,
+            "batch": 1
+          },
+          "val": {
+            "imgsz": 32
+          },
+          "export": {
+            "format": "onnx",
+            "imgsz": 32
+          }
+        },
+        "artifacts": {},
+        "policy": {
+          "dry_run": true
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "paths": [
+          "dry_run",
+          "plan.target",
+          "pipeline.stage_order",
+          "usage.tokens",
+          "cost_estimate"
+        ],
+        "path_exists": [
+          "manifest"
+        ]
+      }
+    },
+    {
+      "name": "pipeline_profile_dry_run",
+      "suite": "dry-run",
+      "request": {
+        "skill": "yolo.pipeline.experiment",
+        "inputs": {
+          "profile": "26/yolo26-master-mot-n",
+          "data": "coco8.yaml"
+        },
+        "params": {
+          "train": {
+            "epochs": 1,
+            "imgsz": 32,
+            "batch": 1
+          },
+          "val": {
+            "imgsz": 32
+          }
+        },
+        "policy": {
+          "dry_run": true
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "paths": [
+          "dry_run",
+          "plan.inputs.model",
+          "plan.inputs.task",
+          "pipeline.stage_order",
+          "manifest"
+        ],
+        "contains": {
+          "plan.inputs.model": "yolo26-master-mot-n.yaml"
+        },
+        "equals": {
+          "plan.inputs.task": "detect"
+        },
+        "path_exists": [
+          "manifest"
+        ]
+      }
+    }
+  ]
+}
