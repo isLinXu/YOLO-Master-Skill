@@ -125,7 +125,7 @@
           "error.type"
         ],
         "nonempty": [
-          "error.traceback"
+          "error.message"
         ],
         "path_exists": [
           "manifest"

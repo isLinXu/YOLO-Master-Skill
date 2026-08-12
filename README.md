@@ -41,8 +41,11 @@ python scripts/run_yolo_master_skill.py --json \
 The request envelope accepts a `skill`, `inputs`, `params`, `runtime`, `artifacts`, and `policy` object. See
 [`SKILL.md`](SKILL.md) for the supported operations and examples.
 
-For longer tasks, set `policy.async=true` to submit a subprocess job. Use `yolo.job.status` and `yolo.job.cancel` to
-manage it.
+For longer tasks, set `policy.async=true` to submit a subprocess job. Poll it with `yolo.job.status`; terminal states
+are `succeeded`, `failed`, `cancelled`, and `interrupted`, and the status records the redacted `result.json` path.
+`yolo.job.cancel` records a cancellation request first, then the runner confirms `cancelled` after its child exits.
+The optional `callback_url` is retained only as a redacted configuration signal; this local runtime does not dispatch
+HTTP callbacks. Async request snapshots and result files live under this Skill's ignored `logs/async-jobs/` directory.
 
 ## Validation
 

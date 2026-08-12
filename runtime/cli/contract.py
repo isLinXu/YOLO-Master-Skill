@@ -19,11 +19,13 @@ PROVIDER_CONFIG_DIR = SKILL_ROOT / "runtime" / "multimodal" / "providers"
 MANIFEST_SCHEMA_VERSION = 1
 MANIFEST_LOG_LIMIT = 20_000
 REDACTED = "<redacted>"
+_SAFE_PATH_COMPONENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 _SENSITIVE_KEYS = {
     "api_key",
     "apikey",
     "authorization",
+    "callback_url",
     "client_secret",
     "password",
     "refresh_token",
@@ -294,15 +296,62 @@ def enrich_envelope(payload: dict[str, Any]) -> dict[str, Any]:
     return json_safe(payload)
 
 
-def ensure_manifest_dir(request: dict[str, Any]) -> Path:
-    project = request.get("artifacts", {}).get("project")
-    name = request.get("artifacts", {}).get("name")
-    base = (
-        (REPO_ROOT / project).resolve()
-        if project
-        else DEFAULT_MANIFEST_DIR / request["request_id"]
+def _safe_path_component(value: Any, label: str) -> str:
+    """Validate a single manifest path component supplied by a caller."""
+    text = str(value or "")
+    if not _SAFE_PATH_COMPONENT_RE.fullmatch(text):
+        raise ValueError(
+            f"`{label}` must be a 1-128 character path component containing only letters, numbers, '.', '_' or '-'."
+        )
+    return text
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    """Return whether a resolved path is contained by a resolved parent path."""
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def _manifest_project_dir(project: Any) -> Path:
+    """Resolve an optional project directory while keeping manifests under runs/agent."""
+    manifest_root = DEFAULT_MANIFEST_DIR.resolve()
+    if project in (None, ""):
+        return manifest_root
+
+    configured = Path(str(project))
+    if configured.is_absolute():
+        raise ValueError(
+            "`artifacts.project` must be relative to the YOLO-Master checkout."
+        )
+    # A simple project label is an ergonomic alias for runs/agent/<label>.
+    candidate = (
+        (DEFAULT_MANIFEST_DIR / configured).resolve()
+        if len(configured.parts) == 1
+        else (REPO_ROOT / configured).resolve()
     )
-    target = base / name if name else base
+    if not _is_relative_to(candidate, manifest_root):
+        raise ValueError(
+            "`artifacts.project` must resolve beneath YOLO-Master runs/agent."
+        )
+    return candidate
+
+
+def ensure_manifest_dir(request: dict[str, Any]) -> Path:
+    """Return a contained manifest output directory, creating it if necessary."""
+    artifacts = request.get("artifacts", {})
+    if not isinstance(artifacts, dict):
+        raise ValueError("`artifacts` must be an object.")
+    project = artifacts.get("project")
+    name = artifacts.get("name")
+    base = _manifest_project_dir(project)
+    if not project:
+        base = base / _safe_path_component(request.get("request_id"), "request_id")
+    target = base / _safe_path_component(name, "artifacts.name") if name else base
+    if not _is_relative_to(target.resolve(), DEFAULT_MANIFEST_DIR.resolve()):
+        raise ValueError("manifest output must remain beneath YOLO-Master runs/agent.")
     target.mkdir(parents=True, exist_ok=True)
     return target
 
@@ -358,13 +407,13 @@ def finalize_payload(
     payload.setdefault("request_id", request.get("request_id"))
     if "manifest" not in payload:
         payload["manifest"] = str(write_manifest(request, payload))
-    return json_safe(payload)
+    return redact_sensitive(json_safe(payload))
 
 
 def response(skill: str, status: str, summary: str, **kwargs: Any) -> dict[str, Any]:
     payload = {"skill": skill, "status": status, "summary": summary}
     payload.update(kwargs)
-    return enrich_envelope(payload)
+    return redact_sensitive(enrich_envelope(payload))
 
 
 def plan_response(

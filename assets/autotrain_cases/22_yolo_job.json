@@ -6,7 +6,7 @@
       "request": {
         "skill": "yolo.job.status",
         "inputs": {
-          "job_id": "missing-job-contract"
+          "job_id": "a1b2c3d4e5f6"
         },
         "params": {},
         "policy": {
@@ -31,7 +31,7 @@
       "request": {
         "skill": "yolo.job.cancel",
         "inputs": {
-          "job_id": "missing-job-contract"
+          "job_id": "a1b2c3d4e5f6"
         },
         "params": {},
         "policy": {
@@ -47,8 +47,37 @@
         ],
         "equals": {
           "job.status": "missing",
-          "job.cancelled": false
+          "job.cancel_requested": false
         }
+      }
+    },
+    {
+      "name": "async_job_lifecycle_security_probe",
+      "suite": "contract",
+      "executor": "probe",
+      "probe": {
+        "kind": "async_job_lifecycle"
+      },
+      "request": {
+        "skill": "yolo.job.status"
+      },
+      "expect": {
+        "status": "ok",
+        "equals": {
+          "data.final_status": "succeeded",
+          "data.failed_status": "failed",
+          "data.cancelled_status": "cancelled",
+          "data.cancelled_exit_code": 0,
+          "data.request_redacted": true,
+          "data.result_redacted": true,
+          "data.invalid_job_id_rejected": true,
+          "data.invalid_job_id_did_not_create_dir": true,
+          "data.project_escape_rejected": true,
+          "data.project_escape_did_not_create_dir": true,
+          "data.explicit_project_remains_relative": true,
+          "data.result_exists": true
+        },
+        "max_elapsed_sec": 30
       }
     }
   ]

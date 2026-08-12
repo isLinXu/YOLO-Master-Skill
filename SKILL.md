@@ -45,6 +45,9 @@ device automatically and encounters a device-runtime failure.
 The dispatcher emits a structured response and a redacted, versioned `skill_manifest.json`. Experiment artifacts and
 manifests are written in the YOLO-Master checkout under `runs/agent/` by default.
 
+`artifacts.project` must resolve beneath `runs/agent/`; use a simple project label such as `artifacts.project="trial-a"`
+or an explicit contained path such as `runs/agent/trial-a`. `artifacts.name` is one safe path component.
+
 ## Examples
 
 Train plan:
@@ -67,6 +70,20 @@ Release audit:
 python scripts/run_yolo_master_skill.py --json \
   '{"skill":"yolo.release.audit","inputs":{"manifest":"runs/agent/experiment/skill_manifest.json"},"policy":{"dry_run":true}}' --pretty
 ```
+
+Async job:
+
+```bash
+python scripts/run_yolo_master_skill.py --json \
+  '{"skill":"yolo.train","inputs":{"model":"yolo11n.pt","data":"coco8.yaml"},"params":{"epochs":1,"imgsz":32},"policy":{"async":true}}' --pretty
+python scripts/run_yolo_master_skill.py --json \
+  '{"skill":"yolo.job.status","inputs":{"job_id":"<job_id>"}}' --pretty
+```
+
+Async jobs persist a redacted request snapshot, runner status, logs, and `result.json` in the Skill-local ignored
+`logs/async-jobs/` directory. Poll until a terminal state: `succeeded`, `failed`, `cancelled`, or `interrupted`.
+`yolo.job.cancel` requests termination and returns `cancelling` until the runner confirms the terminal state. API keys
+must remain in environment variables; inline credentials and callback URLs are redacted and are never dispatched.
 
 ## Multimodal Rules
 

@@ -6,7 +6,6 @@ import importlib
 import json
 import os
 import sys
-import traceback
 import urllib.request  # noqa: F401 - validator probes monkeypatch dispatcher.urllib.request
 from pathlib import Path
 from typing import Any
@@ -411,6 +410,7 @@ def main() -> int:
     args = parser.parse_args()
 
     request: dict[str, Any] | None = None
+    payload: dict[str, Any]
     try:
         request = normalize_request(load_request(args))
         skill = request.get("skill")
@@ -423,10 +423,14 @@ def main() -> int:
             request.get("skill", "unknown") if request else "unknown",
             "failed",
             str(exc),
-            error={"type": type(exc).__name__, "traceback": traceback.format_exc()},
+            error={"type": type(exc).__name__, "message": str(exc)},
         )
         if request:
-            payload = finalize_payload(request, payload)
+            try:
+                payload = finalize_payload(request, payload)
+            except Exception:
+                # A rejected artifact destination must still produce a structured error without attempting I/O again.
+                payload.setdefault("request_id", request.get("request_id"))
 
     if args.pretty:
         print(json.dumps(payload, ensure_ascii=False, indent=2))

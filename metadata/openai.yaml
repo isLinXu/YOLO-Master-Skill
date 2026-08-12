@@ -28,12 +28,15 @@ schema:
           - yolo.lora.adapters
           - yolo.lora.diagnose
           - yolo.eval.peft_compare
+          - yolo.eval.sparse_sahi_compare
           - yolo.moe.diagnose
           - yolo.moe.prune
           - yolo.solutions.run
           - yolo.ui.launch
           - yolo.pipeline.experiment
           - yolo.release.audit
+          - yolo.job.status
+          - yolo.job.cancel
       inputs:
         type: object
         additionalProperties: true
@@ -51,6 +54,8 @@ schema:
           path:
             type: string
           manifest:
+            type: string
+          job_id:
             type: string
       params:
         type: object
@@ -81,6 +86,8 @@ schema:
         additionalProperties: true
         properties:
           dry_run:
+            type: boolean
+          async:
             type: boolean
   response_envelope:
     type: object

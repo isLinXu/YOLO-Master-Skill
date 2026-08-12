@@ -232,7 +232,16 @@ def normalize_request(request: dict[str, Any]) -> dict[str, Any]:
         request["profile"] = profile
     request["inputs"] = normalize_value(request["inputs"])
     request["params"] = normalize_value(request["params"])
-    request["artifacts"] = normalize_value(request["artifacts"])
+    # Artifact routing is validated by contract.ensure_manifest_dir. Keep its user-facing
+    # project/name values relative so the containment check can distinguish them from paths.
+    artifacts = dict(request["artifacts"])
+    project = artifacts.pop("project", None)
+    name = artifacts.pop("name", None)
+    request["artifacts"] = normalize_value(artifacts)
+    if project is not None:
+        request["artifacts"]["project"] = project
+    if name is not None:
+        request["artifacts"]["name"] = name
     return request
 
 

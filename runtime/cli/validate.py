@@ -8,6 +8,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -389,6 +390,134 @@ def run_probe_case(case: dict[str, Any]) -> dict[str, Any]:
     start = time.perf_counter()
     stdout = ""
     stderr = ""
+    if kind == "async_job_lifecycle":
+        module = load_dispatcher_module()
+        from runtime.cli.async_jobs import AsyncJobManager, run_async_job
+        from runtime.cli.contract import _manifest_project_dir, ensure_manifest_dir
+
+        secret = "async-probe-secret-value"
+
+        def wait_for_terminal(manager: AsyncJobManager, job_id: str) -> dict[str, Any]:
+            deadline = time.monotonic() + 30
+            current: dict[str, Any] = {}
+            while time.monotonic() < deadline:
+                current = manager.status(job_id)
+                if current.get("status") in {
+                    "succeeded",
+                    "failed",
+                    "cancelled",
+                    "interrupted",
+                }:
+                    return current
+                time.sleep(0.1)
+            raise TimeoutError(
+                f"async probe job {job_id} did not reach a terminal state: {current}"
+            )
+
+        with tempfile.TemporaryDirectory(prefix="yolo-master-async-probe-") as temp_dir:
+            manager = AsyncJobManager(root=Path(temp_dir) / "jobs")
+            base_request = module.normalize_request(
+                {
+                    "skill": "yolo.system",
+                    "action": "doctor",
+                    "params": {"ensure_cli": False, "api_key": secret},
+                    "artifacts": {"name": "async-job-probe"},
+                    "policy": {
+                        "async": True,
+                        "dry_run": True,
+                        "callback_url": f"https://example.invalid/callback?access_token={secret}",
+                    },
+                }
+            )
+            submitted = manager.submit(
+                "yolo.system",
+                base_request,
+                callback_url=base_request["policy"]["callback_url"],
+            )
+            success = wait_for_terminal(manager, submitted["job_id"])
+            snapshot = Path(submitted["request_path"]).read_text(encoding="utf-8")
+            result_text = Path(success["result_path"]).read_text(encoding="utf-8")
+
+            failed_request = module.normalize_request(
+                {
+                    "skill": "yolo.unsupported",
+                    "params": {},
+                    "artifacts": {"name": "async-job-probe-failed"},
+                    "policy": {"async": True, "dry_run": True},
+                }
+            )
+            failed_job = manager.submit("yolo.unsupported", failed_request)
+            failed = wait_for_terminal(manager, failed_job["job_id"])
+
+            cancelled_dir = manager._job_dir("c0ffee000000", create=True)
+            (cancelled_dir / "status.json").write_text(
+                json.dumps({"job_id": "c0ffee000000", "status": "cancelling"}),
+                encoding="utf-8",
+            )
+            cancelled_exit_code = run_async_job(cancelled_dir)
+            cancelled = manager.status("c0ffee000000")
+
+            try:
+                manager.status("../escape")
+            except ValueError:
+                invalid_job_id_rejected = True
+            else:
+                invalid_job_id_rejected = False
+            invalid_job_id_did_not_create_dir = not (Path(temp_dir) / "escape").exists()
+
+            outside_manifest = Path(temp_dir) / "outside-manifest"
+            try:
+                ensure_manifest_dir(
+                    {
+                        "request_id": "async-path-probe",
+                        "artifacts": {"project": str(outside_manifest)},
+                    }
+                )
+            except ValueError:
+                project_escape_rejected = True
+            else:
+                project_escape_rejected = False
+            project_escape_did_not_create_dir = not outside_manifest.exists()
+            contained_project_path = _manifest_project_dir(
+                "runs/agent/async-path-probe"
+            )
+            explicit_project_remains_relative = contained_project_path == (
+                YOLO_MASTER_ROOT / "runs" / "agent" / "async-path-probe"
+            )
+
+            payload = {
+                "skill": "yolo.job.status",
+                "status": "ok"
+                if success.get("status") == "succeeded"
+                and failed.get("status") == "failed"
+                else "failed",
+                "summary": "async job lifecycle probe finished",
+                "data": {
+                    "final_status": success.get("status"),
+                    "failed_status": failed.get("status"),
+                    "cancelled_status": cancelled.get("status"),
+                    "cancelled_exit_code": cancelled_exit_code,
+                    "request_redacted": secret not in snapshot
+                    and "<redacted>" in snapshot,
+                    "result_redacted": secret not in result_text
+                    and "<redacted>" in result_text,
+                    "invalid_job_id_rejected": invalid_job_id_rejected,
+                    "invalid_job_id_did_not_create_dir": invalid_job_id_did_not_create_dir,
+                    "project_escape_rejected": project_escape_rejected,
+                    "project_escape_did_not_create_dir": project_escape_did_not_create_dir,
+                    "explicit_project_remains_relative": explicit_project_remains_relative,
+                    "result_exists": Path(success["result_path"]).exists(),
+                },
+            }
+        return build_result(
+            case,
+            request,
+            payload,
+            elapsed=time.perf_counter() - start,
+            returncode=0 if payload["status"] == "ok" else 1,
+            stdout=stdout,
+            stderr=stderr,
+        )
     if kind == "recovery_auto_retry":
         module = load_dispatcher_module()
         calls: list[list[str]] = []
