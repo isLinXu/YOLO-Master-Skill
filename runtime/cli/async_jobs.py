@@ -7,6 +7,7 @@ import re
 import signal
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -256,6 +257,13 @@ class AsyncJobManager:
             return status
         if self._runner_alive(runner_pid, job_dir):
             return status
+
+        # The runner writes terminal state immediately before exiting. Give an atomic
+        # status replacement one brief chance to become visible before declaring loss.
+        time.sleep(0.05)
+        completed = self._read_status(job_dir)
+        if completed.get("status") in TERMINAL_JOB_STATUSES:
+            return completed
 
         # Only the runner can attest success. A vanished non-terminal runner is interrupted, never completed.
         status.update(

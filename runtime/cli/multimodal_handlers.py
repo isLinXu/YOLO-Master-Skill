@@ -7,10 +7,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from runtime.cli.contract import (
+    ensure_manifest_child,
     ensure_manifest_dir,
+    inject_manifest_output_params,
     json_safe,
     plan_response,
     response,
+    write_json_artifact,
     write_manifest,
 )
 from runtime.cli.dataset import (
@@ -129,6 +132,7 @@ def run_multimodal_infer(
     yolo_params, chosen_device, auto_completed = apply_runtime_defaults(
         request, yolo_params, purpose="predict"
     )
+    yolo_params = inject_manifest_output_params(request, yolo_params)
     effective_request = deepcopy(request)
     effective_request["params"] = yolo_params
     effective_request["inputs"]["source"] = source
@@ -461,14 +465,7 @@ def run_multimodal_infer(
     )
     if fusion_preview.get("enabled"):
         fusion_path = ensure_manifest_dir(request) / "fusion-preview.json"
-        fusion_path.write_text(
-            json.dumps(
-                json_safe({"image": image_ref, "fusion": fusion_preview}),
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
+        write_json_artifact(fusion_path, {"image": image_ref, "fusion": fusion_preview})
         fusion_preview["artifact"] = str(fusion_path.resolve())
         fusion_artifacts.append(
             {"kind": "fusion_preview", "path": str(fusion_path.resolve())}
@@ -610,6 +607,7 @@ def run_multimodal_evaluate(
     yolo_params, chosen_device, auto_completed = apply_runtime_defaults(
         request, yolo_params, purpose="predict"
     )
+    yolo_params = inject_manifest_output_params(request, yolo_params)
     if "verbose" not in yolo_params:
         yolo_params["verbose"] = False
         auto_completed["verbose"] = False
@@ -1074,7 +1072,11 @@ def run_multimodal_evaluate(
                     "model": request["inputs"]["model"],
                     "data": data_ref_for_baseline,
                 },
-                "params": {k: v for k, v in yolo_params.items() if k not in {"source"}},
+                "params": {
+                    k: v
+                    for k, v in yolo_params.items()
+                    if k not in {"source", "project", "name", "exist_ok"}
+                },
                 "artifacts": request.get("artifacts", {}),
                 "policy": request.get("policy", {}),
                 "request_id": f"{request.get('request_id', default_request_id('yolo.multimodal.evaluate'))}-baseline",
@@ -1097,8 +1099,9 @@ def run_multimodal_evaluate(
     )
 
     report_dir = ensure_manifest_dir(request)
-    report_path = report_dir / report_name
-    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path = ensure_manifest_child(
+        request, report_name, "params.report_name", "multimodal-evaluation.json"
+    )
     report = {
         "skill": request.get("skill"),
         "request_id": request.get("request_id"),
@@ -1185,15 +1188,10 @@ def run_multimodal_evaluate(
     report["metric_guardrail"] = {
         k: v for k, v in metric_guardrail.items() if k != "records"
     }
-    report_path.write_text(
-        json.dumps(json_safe(report), ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    write_json_artifact(report_path, report)
     artifacts = [{"kind": "json", "path": str(report_path.resolve())}]
     open_world_report_path = report_dir / "open-world-comparison-report.json"
-    open_world_report_path.write_text(
-        json.dumps(json_safe(open_world_report), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    write_json_artifact(open_world_report_path, open_world_report)
     artifacts.append(
         {
             "kind": "open_world_comparison_report",
@@ -1202,10 +1200,7 @@ def run_multimodal_evaluate(
     )
     if fusion_coco_records:
         fusion_path = report_dir / "fusion-preview-coco-predictions.json"
-        fusion_path.write_text(
-            json.dumps(json_safe(fusion_coco_records), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        write_json_artifact(fusion_path, fusion_coco_records)
         artifacts.append(
             {
                 "kind": "fusion_coco_predictions_preview",
@@ -1214,21 +1209,13 @@ def run_multimodal_evaluate(
         )
     if metric_preview.get("status") == "ok":
         metric_path = report_dir / "fusion-metric-preview.json"
-        metric_path.write_text(
-            json.dumps(json_safe(metric_preview), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        write_json_artifact(metric_path, metric_preview)
         artifacts.append(
             {"kind": "fusion_metric_preview", "path": str(metric_path.resolve())}
         )
     if metric_guardrail.get("records"):
         guarded_path = report_dir / "metric-guarded-coco-predictions.json"
-        guarded_path.write_text(
-            json.dumps(
-                json_safe(metric_guardrail["records"]), ensure_ascii=False, indent=2
-            ),
-            encoding="utf-8",
-        )
+        write_json_artifact(guarded_path, metric_guardrail["records"])
         artifacts.append(
             {
                 "kind": "metric_guarded_coco_predictions",

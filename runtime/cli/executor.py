@@ -13,8 +13,13 @@ import sysconfig
 from pathlib import Path
 from typing import Any
 
-from runtime.cli.contract import json_safe, plan_response, response
-from runtime.cli.normalize import coerce_scalar, resolved_path
+from runtime.cli.contract import (
+    inject_manifest_output_params,
+    json_safe,
+    plan_response,
+    response,
+)
+from runtime.cli.normalize import coerce_scalar
 from runtime.paths import YOLO_MASTER_ROOT
 
 REPO_ROOT = YOLO_MASTER_ROOT
@@ -102,42 +107,128 @@ def kv_arg(key: str, value: Any) -> str:
     return f"{key}={cli_value(value)}"
 
 
-def repo_cli_env() -> dict[str, str]:
+def repo_cli_env(config_dir: Path | None = None) -> dict[str, str]:
+    """Return the CLI environment, optionally using request-local Ultralytics settings."""
     env = os.environ.copy()
     current = env.get("PYTHONPATH", "")
     prefix = str(REPO_ROOT)
     env["PYTHONPATH"] = prefix if not current else f"{prefix}{os.pathsep}{current}"
+    if config_dir is not None:
+        env["YOLO_CONFIG_DIR"] = str(config_dir)
     return env
 
 
 def cli_save_dir(request: dict[str, Any], params: dict[str, Any]) -> Path | None:
+    """Return the controlled CLI output directory after artifact injection."""
     project = params.get("project")
     name = params.get("name")
-    if project and name:
-        return resolved_path(str(project)) / str(name)
-    if project:
-        return resolved_path(str(project))
-    return None
+    if not project or not name:
+        return None
+    return Path(str(project)).resolve() / str(name)
 
 
 def inject_cli_artifact_location(
     request: dict[str, Any], params: dict[str, Any]
 ) -> dict[str, Any]:
-    enriched = dict(params)
-    if "project" not in enriched:
-        enriched["project"] = str(DEFAULT_MANIFEST_DIR)
-    if "name" not in enriched:
-        enriched["name"] = request["request_id"]
-    return enriched
+    """Reserve a request-scoped directory for Ultralytics CLI artifacts."""
+    return inject_manifest_output_params(request, params)
+
+
+def _prepare_isolated_cli_config(
+    yolo_path: str, runs_dir: Path, env: dict[str, str]
+) -> dict[str, Any]:
+    """Create request-local Ultralytics settings without touching user configuration."""
+    config_dir = runs_dir / ".ultralytics-config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    env["YOLO_CONFIG_DIR"] = str(config_dir)
+    proc = subprocess.run(
+        [yolo_path, "settings", f"runs_dir={runs_dir}"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    setup = {
+        "config_dir": str(config_dir),
+        "runs_dir": str(runs_dir),
+        "returncode": proc.returncode,
+        "stdout": strip_ansi(proc.stdout),
+        "stderr": strip_ansi(proc.stderr),
+    }
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "Failed to initialize request-local Ultralytics settings. "
+            f"stdout={setup['stdout']} stderr={setup['stderr']}"
+        )
+    return setup
+
+
+def isolated_cli_env(yolo_path: str, runs_dir: Path) -> dict[str, str]:
+    """Return a CLI environment backed by request-local Ultralytics settings."""
+    env = repo_cli_env()
+    _prepare_isolated_cli_config(yolo_path, runs_dir, env)
+    return env
+
+
+def isolated_python_env(python_executable: str, runs_dir: Path) -> dict[str, str]:
+    """Return a Python environment backed by request-local Ultralytics settings."""
+    config_dir = runs_dir / ".ultralytics-config"
+    env = repo_cli_env(config_dir)
+    program = (
+        "from ultralytics.utils import SETTINGS; "
+        f"SETTINGS.update({{'runs_dir': {str(runs_dir)!r}}})"
+    )
+    proc = subprocess.run(
+        [python_executable, "-c", program],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "Failed to initialize request-local Ultralytics settings. "
+            f"stdout={strip_ansi(proc.stdout)} stderr={strip_ansi(proc.stderr)}"
+        )
+    return env
+
+
+@contextlib.contextmanager
+def isolated_ultralytics_runs_dir(runs_dir: Path):
+    """Temporarily isolate Python API defaults without persisting user settings."""
+    import ultralytics.utils as utils
+
+    settings = utils.SETTINGS
+    lock = getattr(settings, "lock", None)
+    guard = lock if lock is not None else contextlib.nullcontext()
+    with guard:
+        previous_runs_dir = settings.get("runs_dir")
+        previous_global_runs_dir = utils.RUNS_DIR
+        dict.__setitem__(settings, "runs_dir", str(runs_dir))
+        utils.RUNS_DIR = Path(runs_dir)
+        try:
+            yield
+        finally:
+            dict.__setitem__(settings, "runs_dir", previous_runs_dir)
+            utils.RUNS_DIR = previous_global_runs_dir
 
 
 def run_cli(
-    args: list[str], cwd: Path | None = None, force_install: bool = False
+    args: list[str],
+    cwd: Path | None = None,
+    force_install: bool = False,
+    isolated_runs_dir: Path | None = None,
 ) -> dict[str, Any]:
     yolo_path, install = ensure_yolo_cli(force_install=force_install)
     cmd = [yolo_path, *args]
+    env = repo_cli_env()
+    runtime_config = (
+        _prepare_isolated_cli_config(yolo_path, isolated_runs_dir, env)
+        if isolated_runs_dir is not None
+        else None
+    )
     proc = subprocess.run(
-        cmd, cwd=cwd or REPO_ROOT, capture_output=True, text=True, env=repo_cli_env()
+        cmd, cwd=cwd or REPO_ROOT, capture_output=True, text=True, env=env
     )
     return {
         "cmd": cmd,
@@ -146,6 +237,7 @@ def run_cli(
         "stdout": strip_ansi(proc.stdout),
         "stderr": strip_ansi(proc.stderr),
         "install": install,
+        "runtime_config": runtime_config,
     }
 
 
@@ -156,6 +248,7 @@ def cli_logs(cli_result: dict[str, Any]) -> dict[str, Any]:
         "stdout": cli_result["stdout"],
         "stderr": cli_result["stderr"],
         "install": cli_result["install"],
+        "runtime_config": cli_result.get("runtime_config"),
     }
 
 
@@ -313,8 +406,13 @@ def run_cli_with_recovery(
     failure_summary: str,
     selected_device: str | None,
     selection_source: str | None,
+    cwd: Path | None = None,
+    isolated_runs_dir: Path | None = None,
 ) -> dict[str, Any]:
-    cli_result = run_cli(cli_args_from_values(mode, values))
+    run_kwargs = {"cwd": cwd}
+    if isolated_runs_dir is not None:
+        run_kwargs["isolated_runs_dir"] = isolated_runs_dir
+    cli_result = run_cli(cli_args_from_values(mode, values), **run_kwargs)
     attempts = [cli_attempt_record(cli_result)]
     recovery: dict[str, Any] | None = None
     final_values = dict(values)
@@ -335,7 +433,7 @@ def run_cli_with_recovery(
             "trigger": first_error,
         }
         final_values = replace_cli_device(values, "cpu")
-        cli_result = run_cli(cli_args_from_values(mode, final_values))
+        cli_result = run_cli(cli_args_from_values(mode, final_values), **run_kwargs)
         attempts.append(cli_attempt_record(cli_result))
         final_device = "cpu"
         recovery["recovered"] = cli_result["returncode"] == 0

@@ -1,0 +1,33 @@
+{
+  "cases": [
+    {
+      "name": "artifact_path_containment_contract",
+      "suite": "contract",
+      "executor": "probe",
+      "probe": {
+        "kind": "artifact_path_containment"
+      },
+      "request": {
+        "skill": "yolo.moe.prune"
+      },
+      "expect": {
+        "status": "ok",
+        "equals": {
+          "data.project_name_rejected": true,
+          "data.export_name_allowed": true,
+          "data.relative_escape_rejected": true,
+          "data.absolute_escape_rejected": true,
+          "data.moe_escape_rejected": true,
+          "data.sahi_escape_rejected": true,
+          "data.release_escape_rejected": true,
+          "data.legal_child_accepted": true,
+          "data.legal_moe_child_accepted": true,
+          "data.injected_output_is_manifest": true,
+          "data.progress_is_manifest_child": true,
+          "data.artifact_json_redacted": true
+        },
+        "max_elapsed_sec": 10
+      }
+    }
+  ]
+}

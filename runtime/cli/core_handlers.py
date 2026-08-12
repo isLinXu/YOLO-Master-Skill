@@ -7,7 +7,16 @@ from pathlib import Path
 from typing import Any
 
 from runtime.cli.async_jobs import async_requested, submit_async_skill
-from runtime.cli.contract import json_safe, plan_response, response, write_manifest
+from runtime.cli.contract import (
+    ensure_manifest_child,
+    ensure_manifest_dir,
+    ensure_path_within,
+    inject_manifest_output_params,
+    json_safe,
+    plan_response,
+    response,
+    write_manifest,
+)
 from runtime.cli.device import (
     apply_runtime_defaults,
     collect_environment_report,
@@ -24,6 +33,8 @@ from runtime.cli.executor import (
     parse_cli_speed,
     parse_detection_cli_metrics,
     parse_predict_cli_output,
+    isolated_ultralytics_runs_dir,
+    pushd,
     read_results_csv_metrics,
 )
 from runtime.cli.normalize import is_dry_run, prefer_cli
@@ -34,6 +45,64 @@ class CoreDeps:
     build_model: Callable[[dict[str, Any]], Any]
     run_cli: Callable[..., dict[str, Any]]
     run_cli_with_recovery: Callable[..., dict[str, Any]]
+
+
+def _loaded_model_path(model: Any) -> Path | None:
+    """Return a local checkpoint/config path exposed by a loaded model."""
+    underlying = getattr(model, "model", None)
+    for value in (
+        getattr(underlying, "pt_path", None),
+        getattr(underlying, "yaml_file", None),
+        getattr(model, "ckpt_path", None),
+        getattr(model, "cfg", None),
+    ):
+        if value in (None, ""):
+            continue
+        candidate = Path(str(value)).expanduser()
+        if candidate.is_file():
+            return candidate.resolve()
+    return None
+
+
+def _stage_export_model(
+    request: dict[str, Any], model_ref: Any, model: Any = None
+) -> Path:
+    """Copy the model input into the request directory before exporting."""
+    source = Path(str(model_ref)).expanduser() if model_ref not in (None, "") else None
+    if source is not None and not source.is_absolute():
+        source = Path(request["workspace_root"]) / source
+    source = source.resolve() if source and source.is_file() else None
+    source = source or (_loaded_model_path(model) if model is not None else None)
+    if source is None or not source.is_file():
+        raise ValueError(
+            "Agent export and benchmark require a local model or YAML path so generated artifacts "
+            "can be contained under the request artifact directory."
+        )
+    target = ensure_manifest_child(
+        request, None, "export.model", f"export-input{source.suffix or '.pt'}"
+    )
+    if source != target:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(source.read_bytes())
+    return target
+
+
+def _set_export_model_path(model: Any, staged: Path) -> None:
+    """Point Ultralytics' exporter at a request-local filename."""
+    underlying = getattr(model, "model", None)
+    if underlying is None:
+        return
+    if staged.suffix.casefold() in {".yaml", ".yml"}:
+        underlying.yaml_file = str(staged)
+    else:
+        underlying.pt_path = str(staged)
+
+
+def _python_output_params(
+    request: dict[str, Any], params: dict[str, Any]
+) -> dict[str, Any]:
+    """Inject the request directory for APIs that honour Ultralytics project/name."""
+    return inject_manifest_output_params(request, params)
 
 
 def metrics_payload(metrics: Any) -> dict[str, Any]:
@@ -144,6 +213,8 @@ def run_train_like(
             failure_summary="training failed",
             selected_device=chosen_device,
             selection_source=device_selection["source"],
+            cwd=ensure_manifest_dir(request),
+            isolated_runs_dir=ensure_manifest_dir(request),
         )
         failed = cli_execution["failed"]
         if failed:
@@ -211,8 +282,9 @@ def run_train_like(
             next_actions=["yolo.val", "yolo.export"],
         )
 
+    api_params = _python_output_params(request, params)
     model = deps.build_model(request)
-    metrics = model.train(**params)
+    metrics = model.train(**api_params)
     environment = collect_environment_report(
         effective_request, selected_device=chosen_device
     )
@@ -323,6 +395,8 @@ def run_val(request: dict[str, Any], deps: CoreDeps) -> dict[str, Any]:
             failure_summary="validation failed",
             selected_device=chosen_device,
             selection_source=device_selection["source"],
+            cwd=ensure_manifest_dir(request),
+            isolated_runs_dir=ensure_manifest_dir(request),
         )
         failed = cli_execution["failed"]
         if failed:
@@ -375,8 +449,9 @@ def run_val(request: dict[str, Any], deps: CoreDeps) -> dict[str, Any]:
             recovery=recovery or {},
         )
 
+    api_params = _python_output_params(request, params)
     model = deps.build_model(request)
-    metrics = model.val(**params)
+    metrics = model.val(**api_params)
     environment = collect_environment_report(
         effective_request, selected_device=chosen_device
     )
@@ -465,6 +540,8 @@ def run_predict_like(
             failure_summary=f"{mode} failed",
             selected_device=chosen_device,
             selection_source=device_selection["source"],
+            cwd=ensure_manifest_dir(request),
+            isolated_runs_dir=ensure_manifest_dir(request),
         )
         failed = cli_execution["failed"]
         if failed:
@@ -511,11 +588,12 @@ def run_predict_like(
             ]
         return payload
 
+    api_params = _python_output_params(request, params)
     model = deps.build_model(request)
     if mode == "predict":
-        results = model.predict(source=source, **params)
+        results = model.predict(source=source, **api_params)
     else:
-        results = model.track(source=source, **params)
+        results = model.track(source=source, **api_params)
     save_dir = getattr(model.predictor, "save_dir", None)
     payload = response(
         request["skill"],
@@ -549,7 +627,7 @@ def run_export(request: dict[str, Any], deps: CoreDeps) -> dict[str, Any]:
     if is_dry_run(request):
         if prefer_cli(request):
             values = build_cli_key_values(
-                request, skip_inputs={"task"}, skip_params=set(), inject_save_dir=True
+                request, skip_inputs={"task"}, skip_params=set(), inject_save_dir=False
             )
             return cli_plan(
                 request,
@@ -565,26 +643,37 @@ def run_export(request: dict[str, Any], deps: CoreDeps) -> dict[str, Any]:
             extra={"environment": environment, "auto_completed": {}},
         )
 
+    staged_model = _stage_export_model(request, request["inputs"].get("model"))
+    artifact_dir = ensure_manifest_dir(request)
     if prefer_cli(request):
         values = build_cli_key_values(
-            request, skip_inputs={"task"}, skip_params=set(), inject_save_dir=True
+            request, skip_inputs={"task"}, skip_params=set(), inject_save_dir=False
         )
-        cli_result = deps.run_cli(cli_args_from_values("export", values))
+        values["model"] = str(staged_model)
+        cli_result = deps.run_cli(
+            cli_args_from_values("export", values),
+            cwd=artifact_dir,
+            isolated_runs_dir=artifact_dir,
+        )
         failed = ensure_cli_success(request, cli_result, "export failed")
         if failed:
             return failed
-        save_dir = cli_save_dir(request, values)
         artifacts = []
-        if save_dir and save_dir.exists():
-            for candidate in sorted(save_dir.rglob("*")):
-                if candidate.is_file() and candidate.suffix not in {
-                    ".csv",
-                    ".yaml",
-                    ".json",
-                    ".txt",
-                    ".jpg",
-                    ".png",
-                }:
+        if artifact_dir.exists():
+            for candidate in sorted(artifact_dir.rglob("*")):
+                if (
+                    candidate.is_file()
+                    and candidate != staged_model
+                    and candidate.suffix
+                    not in {
+                        ".csv",
+                        ".yaml",
+                        ".json",
+                        ".txt",
+                        ".jpg",
+                        ".png",
+                    }
+                ):
                     artifacts.append(
                         {"kind": "exported_model", "path": str(candidate.resolve())}
                     )
@@ -601,17 +690,30 @@ def run_export(request: dict[str, Any], deps: CoreDeps) -> dict[str, Any]:
                 cli_info=cli_result["install"],
             ),
             auto_completed={},
-            job={"mode": "sync", "save_dir": json_safe(save_dir), "executor": "cli"},
+            job={
+                "mode": "sync",
+                "save_dir": json_safe(artifact_dir),
+                "executor": "cli",
+            },
             logs=cli_logs(cli_result),
         )
 
     model = deps.build_model(request)
-    exported = model.export(**request["params"])
+    staged_model = _stage_export_model(request, request["inputs"].get("model"), model)
+    _set_export_model_path(model, staged_model)
+    with pushd(artifact_dir):
+        exported = model.export(**request["params"])
+    exported_path = ensure_path_within(
+        exported,
+        "exported artifact",
+        artifact_dir,
+        relative_to=artifact_dir,
+    )
     payload = response(
         request["skill"],
         "ok",
         "export finished",
-        artifacts=[{"kind": "exported_model", "path": str(Path(exported).resolve())}],
+        artifacts=[{"kind": "exported_model", "path": str(exported_path)}],
         environment=environment,
         auto_completed={},
     )
@@ -634,11 +736,12 @@ def run_benchmark(request: dict[str, Any], deps: CoreDeps) -> dict[str, Any]:
                 effective_request,
                 skip_inputs={"task"},
                 skip_params=set(),
-                inject_save_dir=True,
+                inject_save_dir=False,
             )
             return cli_plan(
                 request,
                 cli_args_from_values("benchmark", values),
+                cwd=ensure_manifest_dir(request),
                 extra={
                     "environment": collect_environment_report(
                         effective_request, selected_device=chosen_device
@@ -660,13 +763,16 @@ def run_benchmark(request: dict[str, Any], deps: CoreDeps) -> dict[str, Any]:
             },
         )
 
+    staged_model = _stage_export_model(request, request["inputs"].get("model"))
+    artifact_dir = ensure_manifest_dir(request)
     if prefer_cli(request):
         values = build_cli_key_values(
             effective_request,
             skip_inputs={"task"},
             skip_params=set(),
-            inject_save_dir=True,
+            inject_save_dir=False,
         )
+        values["model"] = str(staged_model)
         cli_execution = deps.run_cli_with_recovery(
             request,
             "benchmark",
@@ -674,6 +780,8 @@ def run_benchmark(request: dict[str, Any], deps: CoreDeps) -> dict[str, Any]:
             failure_summary="benchmark failed",
             selected_device=chosen_device,
             selection_source=device_selection["source"],
+            cwd=artifact_dir,
+            isolated_runs_dir=artifact_dir,
         )
         failed = cli_execution["failed"]
         if failed:
@@ -682,7 +790,6 @@ def run_benchmark(request: dict[str, Any], deps: CoreDeps) -> dict[str, Any]:
         values = cli_execution["values"]
         final_device = cli_execution["device"]
         recovery = cli_execution["recovery"]
-        save_dir = cli_save_dir(request, values)
         return response(
             request["skill"],
             "ok",
@@ -702,7 +809,7 @@ def run_benchmark(request: dict[str, Any], deps: CoreDeps) -> dict[str, Any]:
             auto_completed=auto_completed,
             job={
                 "mode": "sync",
-                "save_dir": json_safe(save_dir),
+                "save_dir": json_safe(artifact_dir),
                 "executor": "cli",
                 "device": final_device,
             },
@@ -711,8 +818,11 @@ def run_benchmark(request: dict[str, Any], deps: CoreDeps) -> dict[str, Any]:
             recovery=recovery or {},
         )
 
-    model = deps.build_model(request)
-    benchmark_result = model.benchmark(data=data, **params)
+    staged_request = deepcopy(request)
+    staged_request["inputs"]["model"] = str(staged_model)
+    model = deps.build_model(staged_request)
+    with isolated_ultralytics_runs_dir(artifact_dir), pushd(artifact_dir):
+        benchmark_result = model.benchmark(data=data, **params)
     payload = response(
         request["skill"],
         "ok",
@@ -750,8 +860,9 @@ def run_tune(request: dict[str, Any], deps: CoreDeps) -> dict[str, Any]:
             params={"use_ray": use_ray, "iterations": iterations, **params},
         )
 
+    api_params = _python_output_params(request, params)
     model = deps.build_model(request)
-    tuned = model.tune(use_ray=use_ray, iterations=iterations, **params)
+    tuned = model.tune(use_ray=use_ray, iterations=iterations, **api_params)
     payload = response(
         request["skill"], "ok", "tuning finished", data={"tune": json_safe(tuned)}
     )
@@ -765,6 +876,11 @@ def run_lora_adapters(request: dict[str, Any], deps: CoreDeps) -> dict[str, Any]
         raise ValueError("`action` is required for yolo.lora.adapters.")
     params = dict(request["params"])
     path = request["inputs"].get("path") or params.get("path")
+    output_path = (
+        ensure_manifest_child(request, path, "inputs.path", "adapter")
+        if action == "save" and path
+        else None
+    )
     if is_dry_run(request):
         return plan_response(
             request,
@@ -778,12 +894,14 @@ def run_lora_adapters(request: dict[str, Any], deps: CoreDeps) -> dict[str, Any]
     if action == "save":
         if not path:
             raise ValueError("`inputs.path` is required for adapter save.")
-        ok = model.save_lora_only(path)
+        assert output_path is not None
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        ok = model.save_lora_only(str(output_path))
         payload = response(
             request["skill"],
             "ok" if ok else "failed",
             "adapter save finished" if ok else "adapter save skipped",
-            artifacts=[{"kind": "adapter", "path": str(Path(path).resolve())}],
+            artifacts=[{"kind": "adapter", "path": str(output_path.resolve())}],
         )
     elif action == "load":
         if not path:

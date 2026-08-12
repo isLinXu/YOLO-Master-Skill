@@ -97,9 +97,17 @@ _executor_run_cli_with_recovery = cli_executor.run_cli_with_recovery
 
 
 def run_cli(
-    args: list[str], cwd: Path | None = None, force_install: bool = False
+    args: list[str],
+    cwd: Path | None = None,
+    force_install: bool = False,
+    isolated_runs_dir: Path | None = None,
 ) -> dict[str, Any]:
-    return _executor_run_cli(args, cwd=cwd, force_install=force_install)
+    return _executor_run_cli(
+        args,
+        cwd=cwd,
+        force_install=force_install,
+        isolated_runs_dir=isolated_runs_dir,
+    )
 
 
 def run_cli_with_recovery(
@@ -110,6 +118,8 @@ def run_cli_with_recovery(
     failure_summary: str,
     selected_device: str | None,
     selection_source: str | None,
+    cwd: Path | None = None,
+    isolated_runs_dir: Path | None = None,
 ) -> dict[str, Any]:
     original_run_cli = cli_executor.run_cli
     cli_executor.run_cli = globals()["run_cli"]
@@ -121,6 +131,8 @@ def run_cli_with_recovery(
             failure_summary=failure_summary,
             selected_device=selected_device,
             selection_source=selection_source,
+            cwd=cwd,
+            isolated_runs_dir=isolated_runs_dir,
         )
     finally:
         cli_executor.run_cli = original_run_cli

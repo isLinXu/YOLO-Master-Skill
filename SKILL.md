@@ -46,7 +46,11 @@ The dispatcher emits a structured response and a redacted, versioned `skill_mani
 manifests are written in the YOLO-Master checkout under `runs/agent/` by default.
 
 `artifacts.project` must resolve beneath `runs/agent/`; use a simple project label such as `artifacts.project="trial-a"`
-or an explicit contained path such as `runs/agent/trial-a`. `artifacts.name` is one safe path component.
+or an explicit contained path such as `runs/agent/trial-a`. `artifacts.name` is one safe path component. These are the
+only experiment-output controls: do not send `params.project`, `params.name`, or `params.save_dir`. Task-specific
+output values such as `output_dir`, `output_path`, `output`, and `report_name` must be relative children of the
+request's artifact directory; absolute paths and `..` escapes are rejected. `yolo.export` retains `params.name` only
+for exporter target selection (for example `rk3588`), never as an output directory.
 
 ## Examples
 

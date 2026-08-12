@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from runtime.cli.contract import (
-    ensure_manifest_dir,
+    ensure_manifest_child,
     json_safe,
     plan_response,
     response,
@@ -82,8 +82,11 @@ def run_sahi_compare(request: dict[str, Any]) -> dict[str, Any]:
             "`inputs.model` is required for yolo.eval.sparse_sahi_compare."
         )
     images, dataset_info = _resolve_images(request, params)
-    output_dir = Path(
-        params.get("output_dir") or ensure_manifest_dir(request) / "sparse_sahi_compare"
+    output_dir = ensure_manifest_child(
+        request,
+        params.get("output_dir"),
+        "params.output_dir",
+        "sparse_sahi_compare",
     )
     conf = float(params.get("conf", params.get("conf_thres", 0.25)))
     imgsz = int(params.get("imgsz", 224))
@@ -135,6 +138,11 @@ def run_sahi_compare(request: dict[str, Any]) -> dict[str, Any]:
 
     output_dir.mkdir(parents=True, exist_ok=True)
     model = YOLO(model_ref)
+    output_params = {
+        "project": str(output_dir.parent),
+        "name": output_dir.name,
+        "exist_ok": True,
+    }
     legacy_sahi = (
         SparseSAHIPredictor(model_ref)
         if include_full_sahi and SparseSAHIPredictor
@@ -145,7 +153,12 @@ def run_sahi_compare(request: dict[str, Any]) -> dict[str, Any]:
         item: dict[str, Any] = {"path": str(image_path)}
         start = time.perf_counter()
         standard = model.predict(
-            str(image_path), imgsz=imgsz, conf=conf, verbose=False, sparse_sahi=False
+            str(image_path),
+            imgsz=imgsz,
+            conf=conf,
+            verbose=False,
+            sparse_sahi=False,
+            **output_params,
         )[0]
         item["standard"] = {
             "latency_sec": round(time.perf_counter() - start, 6),
@@ -176,7 +189,12 @@ def run_sahi_compare(request: dict[str, Any]) -> dict[str, Any]:
             }
         start = time.perf_counter()
         sparse = model.predict(
-            str(image_path), imgsz=imgsz, conf=conf, verbose=False, sparse_sahi=True
+            str(image_path),
+            imgsz=imgsz,
+            conf=conf,
+            verbose=False,
+            sparse_sahi=True,
+            **output_params,
         )[0]
         sparse_meta = getattr(sparse, "sparse_sahi_metadata", {}) or {}
         item["sparse_sahi"] = {

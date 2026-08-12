@@ -8,15 +8,23 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from runtime.cli.contract import plan_response, response, write_manifest
+from runtime.cli.contract import (
+    ensure_manifest_child,
+    ensure_manifest_dir,
+    plan_response,
+    response,
+    write_manifest,
+)
 from runtime.cli.executor import (
     capture_output,
     cli_logs,
     cli_plan,
     ensure_cli_success,
     ensure_yolo_cli,
+    isolated_cli_env,
+    isolated_ultralytics_runs_dir,
+    isolated_python_env,
     kv_arg,
-    repo_cli_env,
 )
 from runtime.cli.normalize import is_dry_run, prefer_cli
 from runtime.paths import SKILL_ROOT, YOLO_MASTER_ROOT
@@ -64,13 +72,24 @@ def run_solutions(request: dict[str, Any], deps: LauncherDeps) -> dict[str, Any]
     solution = request["inputs"].get("solution")
     if not solution:
         raise ValueError("`inputs.solution` is required for yolo.solutions.run.")
+    params = dict(request["params"])
+    if solution == "crop" or "crop_dir" in params:
+        params["crop_dir"] = str(
+            ensure_manifest_child(
+                request,
+                params.get("crop_dir"),
+                "params.crop_dir",
+                "cropped-detections",
+            )
+        )
+    artifact_dir = ensure_manifest_dir(request)
     if is_dry_run(request):
         if prefer_cli(request):
             args = ["solutions", solution]
             for key in ("model", "source"):
                 if request["inputs"].get(key) is not None:
                     args.append(kv_arg(key, request["inputs"][key]))
-            for key, value in request["params"].items():
+            for key, value in params.items():
                 if key != "action":
                     args.append(kv_arg(key, value))
             return cli_plan(request, args)
@@ -78,7 +97,7 @@ def run_solutions(request: dict[str, Any], deps: LauncherDeps) -> dict[str, Any]
         for key in ("model", "source"):
             if request["inputs"].get(key) is not None:
                 args.append(format_solution_arg(key, request["inputs"][key]))
-        for key, value in request["params"].items():
+        for key, value in params.items():
             if key != "action":
                 args.append(format_solution_arg(key, value))
         return plan_response(
@@ -94,10 +113,12 @@ def run_solutions(request: dict[str, Any], deps: LauncherDeps) -> dict[str, Any]
         for key in ("model", "source"):
             if request["inputs"].get(key) is not None:
                 args.append(kv_arg(key, request["inputs"][key]))
-        for key, value in request["params"].items():
+        for key, value in params.items():
             if key != "action":
                 args.append(kv_arg(key, value))
-        cli_result = deps.run_cli(args)
+        cli_result = deps.run_cli(
+            args, cwd=artifact_dir, isolated_runs_dir=artifact_dir
+        )
         failed = ensure_cli_success(request, cli_result, "solutions run failed")
         if failed:
             return failed
@@ -109,27 +130,28 @@ def run_solutions(request: dict[str, Any], deps: LauncherDeps) -> dict[str, Any]
             artifacts=[
                 {
                     "kind": "directory",
-                    "path": str((deps.repo_root / "runs" / "solutions").resolve()),
+                    "path": str(artifact_dir.resolve()),
                 }
             ],
         )
 
-    _, stdout, stderr = capture_output(
-        deps.get_cfg_helpers()["handle_yolo_solutions"],
-        [
-            solution,
-            *[
-                format_solution_arg(k, v)
-                for k, v in request["inputs"].items()
-                if k != "solution"
+    with isolated_ultralytics_runs_dir(artifact_dir):
+        _, stdout, stderr = capture_output(
+            deps.get_cfg_helpers()["handle_yolo_solutions"],
+            [
+                solution,
+                *[
+                    format_solution_arg(k, v)
+                    for k, v in request["inputs"].items()
+                    if k != "solution"
+                ],
+                *[
+                    format_solution_arg(k, v)
+                    for k, v in params.items()
+                    if k != "action"
+                ],
             ],
-            *[
-                format_solution_arg(k, v)
-                for k, v in request["params"].items()
-                if k != "action"
-            ],
-        ],
-    )
+        )
     payload = response(
         request["skill"],
         "ok",
@@ -138,7 +160,7 @@ def run_solutions(request: dict[str, Any], deps: LauncherDeps) -> dict[str, Any]
         artifacts=[
             {
                 "kind": "directory",
-                "path": str((deps.repo_root / "runs" / "solutions").resolve()),
+                "path": str(artifact_dir.resolve()),
             }
         ],
     )
@@ -167,28 +189,38 @@ def run_ui_launch(request: dict[str, Any], deps: LauncherDeps) -> dict[str, Any]
             params={"cmd": cmd_preview},
         )
 
-    deps.log_dir.mkdir(parents=True, exist_ok=True)
-    stdout_path = deps.log_dir / f"{mode}.stdout.log"
-    stderr_path = deps.log_dir / f"{mode}.stderr.log"
-    stdout_handle = open(stdout_path, "ab")
-    stderr_handle = open(stderr_path, "ab")
+    artifact_dir = ensure_manifest_dir(request)
+    stdout_path = ensure_manifest_child(
+        request, None, "launcher.stdout_path", f"{mode}.stdout.log"
+    )
+    stderr_path = ensure_manifest_child(
+        request, None, "launcher.stderr_path", f"{mode}.stderr.log"
+    )
     if mode == "gradio":
         cmd = [deps.python_executable, "app.py"]
+        env = isolated_python_env(deps.python_executable, artifact_dir)
         url = request["params"].get("url", "http://127.0.0.1:7860")
     elif mode == "streamlit":
         model = request["inputs"].get("model") or "yolo11n.pt"
         yolo_path, _ = deps.ensure_yolo_cli()
         cmd = [yolo_path, "solutions", "inference", f"model={model}"]
+        env = isolated_cli_env(yolo_path, artifact_dir)
         url = request["params"].get("url", "http://127.0.0.1:8501")
     else:
         raise ValueError(f"Unsupported ui launch mode: {mode}")
-    process = subprocess.Popen(
-        cmd,
-        cwd=deps.repo_root,
-        stdout=stdout_handle,
-        stderr=stderr_handle,
-        env=repo_cli_env(),
-    )
+    stdout_path.parent.mkdir(parents=True, exist_ok=True)
+    with (
+        stdout_path.open("ab") as stdout_handle,
+        stderr_path.open("ab") as stderr_handle,
+    ):
+        process = subprocess.Popen(
+            cmd,
+            cwd=deps.repo_root,
+            stdout=stdout_handle,
+            stderr=stderr_handle,
+            env=env,
+            start_new_session=True,
+        )
     payload = response(
         request["skill"],
         "running",

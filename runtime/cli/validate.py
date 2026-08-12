@@ -518,6 +518,176 @@ def run_probe_case(case: dict[str, Any]) -> dict[str, Any]:
             stdout=stdout,
             stderr=stderr,
         )
+    if kind == "artifact_path_containment":
+        module = load_dispatcher_module()
+        from runtime.cli.contract import (
+            ensure_manifest_child,
+            inject_manifest_output_params,
+            write_json_artifact,
+        )
+        from runtime.cli.moe_tools import run_moe_diagnose, run_moe_prune
+        from runtime.cli.release import run_release_audit
+        from runtime.cli.sahi_compare import run_sahi_compare
+        from runtime.cli.progress import progress_file_for_request
+
+        def rejected(callable_obj: Any) -> bool:
+            try:
+                callable_obj()
+            except ValueError:
+                return True
+            return False
+
+        base = module.normalize_request(
+            {
+                "skill": "yolo.moe.prune",
+                "inputs": {"model": "checkpoint.pt"},
+                "params": {},
+                "artifacts": {"name": "artifact-path-probe"},
+                "policy": {"dry_run": True},
+            }
+        )
+        valid_output = ensure_manifest_child(
+            base, "nested/pruned.pt", "params.output_path", "pruned_model.pt"
+        )
+        injected = inject_manifest_output_params(base, {"epochs": 1})
+        report_path = ensure_manifest_child(
+            base, "reports/evaluation.json", "params.report_name", "report.json"
+        )
+        write_json_artifact(report_path, {"token": "artifact-probe-secret"})
+        report_text = report_path.read_text(encoding="utf-8")
+        progress_path = progress_file_for_request(base, "nested/progress.jsonl")
+
+        project_name_rejected = all(
+            rejected(
+                lambda key=key: module.normalize_request(
+                    {
+                        "skill": "yolo.train",
+                        "inputs": {"model": "checkpoint.pt", "data": "coco8.yaml"},
+                        "params": {key: "outside"},
+                    }
+                )
+            )
+            for key in ("project", "name", "save_dir")
+        )
+        export_name_allowed = not rejected(
+            lambda: module.normalize_request(
+                {
+                    "skill": "yolo.export",
+                    "inputs": {"model": "checkpoint.pt"},
+                    "params": {"name": "rk3588"},
+                }
+            )
+        )
+        relative_escape_rejected = rejected(
+            lambda: ensure_manifest_child(
+                base, "../escape", "params.output_path", "pruned_model.pt"
+            )
+        )
+        absolute_escape_rejected = rejected(
+            lambda: ensure_manifest_child(
+                base, "/tmp/escape", "params.output_path", "pruned_model.pt"
+            )
+        )
+        moe_escape_rejected = rejected(
+            lambda: run_moe_diagnose(
+                module.normalize_request(
+                    {
+                        "skill": "yolo.moe.diagnose",
+                        "inputs": {"model": "checkpoint.pt"},
+                        "params": {"output_dir": "../escape"},
+                        "policy": {"dry_run": True},
+                    }
+                )
+            )
+        )
+        sahi_escape_rejected = rejected(
+            lambda: run_sahi_compare(
+                module.normalize_request(
+                    {
+                        "skill": "yolo.eval.sparse_sahi_compare",
+                        "inputs": {
+                            "model": "checkpoint.pt",
+                            "source": "ultralytics/assets/bus.jpg",
+                        },
+                        "params": {"output_dir": "/tmp/escape"},
+                        "policy": {"dry_run": True},
+                    }
+                )
+            )
+        )
+        release_escape_rejected = rejected(
+            lambda: run_release_audit(
+                module.normalize_request(
+                    {
+                        "skill": "yolo.release.audit",
+                        "inputs": {
+                            "manifest": "runs/agent/artifact-path-probe/skill_manifest.json"
+                        },
+                        "params": {"output": "../release_bundle.json"},
+                        "policy": {"dry_run": False},
+                    }
+                )
+            )
+        )
+        legal_moe_request = module.normalize_request(
+            {
+                "skill": "yolo.moe.prune",
+                "inputs": {"model": "checkpoint.pt"},
+                "params": {"output_path": "nested/pruned.pt"},
+                "artifacts": {"name": "artifact-path-probe-legal"},
+                "policy": {"dry_run": True},
+            }
+        )
+        legal_moe = run_moe_prune(legal_moe_request)
+        legal_moe_path = Path(legal_moe["plan"]["params"]["output_path"])
+        manifest_dir = ensure_manifest_child(base, ".", "probe.manifest_dir", ".")
+        payload = {
+            "skill": "yolo.moe.prune",
+            "status": "ok"
+            if all(
+                (
+                    project_name_rejected,
+                    export_name_allowed,
+                    relative_escape_rejected,
+                    absolute_escape_rejected,
+                    moe_escape_rejected,
+                    sahi_escape_rejected,
+                    release_escape_rejected,
+                    valid_output == manifest_dir / "nested" / "pruned.pt",
+                    legal_moe_path.parent.name == "nested",
+                )
+            )
+            else "failed",
+            "summary": "artifact path containment probe finished",
+            "data": {
+                "project_name_rejected": project_name_rejected,
+                "export_name_allowed": export_name_allowed,
+                "relative_escape_rejected": relative_escape_rejected,
+                "absolute_escape_rejected": absolute_escape_rejected,
+                "moe_escape_rejected": moe_escape_rejected,
+                "sahi_escape_rejected": sahi_escape_rejected,
+                "release_escape_rejected": release_escape_rejected,
+                "legal_child_accepted": valid_output
+                == manifest_dir / "nested" / "pruned.pt",
+                "legal_moe_child_accepted": legal_moe_path.parent.name == "nested",
+                "injected_output_is_manifest": Path(injected["project"])
+                / injected["name"]
+                == manifest_dir,
+                "progress_is_manifest_child": progress_path
+                == manifest_dir / "nested" / "progress.jsonl",
+                "artifact_json_redacted": "artifact-probe-secret" not in report_text
+                and "<redacted>" in report_text,
+            },
+        }
+        return build_result(
+            case,
+            request,
+            payload,
+            elapsed=time.perf_counter() - start,
+            returncode=0 if payload["status"] == "ok" else 1,
+            stdout=stdout,
+            stderr=stderr,
+        )
     if kind == "recovery_auto_retry":
         module = load_dispatcher_module()
         calls: list[list[str]] = []

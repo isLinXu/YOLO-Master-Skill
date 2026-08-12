@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import math
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from .contract import ensure_manifest_dir, json_safe
+from .contract import ensure_manifest_child, json_safe, write_json_artifact
 
 
 @dataclass(frozen=True)
@@ -231,7 +230,9 @@ def run_lora_diagnose(
     spectrum = delta_weight_spectrum(
         base_model, max_layers=spectrum_max_layers, topk=spectrum_topk
     )
-    output_dir = ensure_manifest_dir(request) / "lora_diagnose"
+    output_dir = ensure_manifest_child(
+        request, None, "lora_diagnose.output_dir", "lora_diagnose"
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     report_path = output_dir / "lora_diagnose.json"
     report = {
@@ -240,9 +241,7 @@ def run_lora_diagnose(
         "stats": json_safe(stats),
         "delta_weight_spectrum": spectrum,
     }
-    report_path.write_text(
-        json.dumps(json_safe(report), ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    write_json_artifact(report_path, report)
     payload = deps.response(
         request["skill"],
         "ok",

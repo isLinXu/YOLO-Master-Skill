@@ -304,6 +304,15 @@ result = model.train(**params)
 }
 ```
 
+### 6.1.1 Artifact Path Contract
+
+`artifacts.project` and `artifacts.name` are the only controls for the experiment directory and must resolve below
+`runs/agent/`. The dispatcher rejects `params.project`, `params.name`, and `params.save_dir` for regular YOLO
+executors. A task-local output value such as `output_dir`, `output_path`, `output`, or `report_name` is a relative
+child of the current request directory, not an alternate experiment root; absolute values and `..` traversal fail
+before the task runs. `yolo.export` keeps `params.name` for hardware target selection (`rk3588`, QNN, Hailo), and
+contains output by staging the input model inside the request directory.
+
 ### 6.2 Response Envelope
 
 ```json
@@ -1122,7 +1131,7 @@ DashScope 等 OpenAI-compatible chat endpoints 可设置:
   "action": "save",
   "inputs": {
     "model": "runs/agent/lora-exp/weights/best.pt",
-    "path": "runs/agent/lora-exp/adapter"
+    "path": "adapter"
   }
 }
 ```
@@ -1192,7 +1201,7 @@ DashScope 等 OpenAI-compatible chat endpoints 可设置:
   },
   "params": {
     "threshold": 0.15,
-    "output_path": "runs/agent/master-moe/pruned.pt"
+    "output_path": "pruned.pt"
   }
 }
 ```
@@ -1277,7 +1286,7 @@ DashScope 等 OpenAI-compatible chat endpoints 可设置:
 **Notes**
 
 - `policy.dry_run=true` 只生成变体计划, 适合 AutoTrain contract。
-- 真跑时应先控制 `epochs`, `batch`, `device`, `project/name`, 避免多个变体输出目录冲突。
+- 真跑时应先控制 `epochs`, `batch`, `device`, `artifacts.project/name`, 避免多个变体输出目录冲突。
 - 推荐在对比后接 `yolo.lora.diagnose`, 查看 effective rank 与 delta-W 谱是否出现退化。
 
 ### 8.17 `yolo.eval.sparse_sahi_compare`

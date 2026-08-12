@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from runtime.cli.contract import (
-    ensure_manifest_dir,
+    ensure_manifest_child,
     json_safe,
     plan_response,
     response,
@@ -150,8 +150,11 @@ def run_moe_diagnose(request: dict[str, Any]) -> dict[str, Any]:
     dataset = inputs.get("data") or params.get("data", "coco8.yaml")
     batch_size = int(params.get("batch_size", 1))
     verbose = bool(params.get("verbose", False))
-    output_dir = Path(
-        params.get("output_dir") or ensure_manifest_dir(request) / "moe_diagnose"
+    output_dir = ensure_manifest_child(
+        request,
+        params.get("output_dir"),
+        "params.output_dir",
+        "moe_diagnose",
     )
     if is_dry_run(request):
         return plan_response(
@@ -208,8 +211,11 @@ def run_moe_prune(request: dict[str, Any]) -> dict[str, Any]:
     params = request["params"]
     model_path = inputs.get("model")
     dataset = inputs.get("data") or params.get("data", "coco8.yaml")
-    output_path = params.get("output_path") or str(
-        ensure_manifest_dir(request) / "pruned_model.pt"
+    output_path = ensure_manifest_child(
+        request,
+        params.get("output_path"),
+        "params.output_path",
+        "pruned_model.pt",
     )
     threshold = float(params.get("threshold", 0.15))
     if is_dry_run(request):
@@ -220,14 +226,14 @@ def run_moe_prune(request: dict[str, Any]) -> dict[str, Any]:
             "prune_moe_model",
             params={
                 "model_path": model_path,
-                "output_path": output_path,
+                "output_path": str(output_path),
                 "threshold": threshold,
                 "dataset": dataset,
             },
             extra={
                 "moe_prune": {
                     "original_model": model_path,
-                    "pruned_model": output_path,
+                    "pruned_model": str(output_path),
                     "threshold": threshold,
                     "prune_ratio": None,
                     "layer_details": [],
@@ -239,7 +245,7 @@ def run_moe_prune(request: dict[str, Any]) -> dict[str, Any]:
 
     prune_moe_model = get_moe_helpers()["prune_moe_model"]
     ok, stdout, stderr = capture_output(
-        prune_moe_model, model_path, output_path, threshold, dataset
+        prune_moe_model, model_path, str(output_path), threshold, dataset
     )
     payload = response(
         request["skill"],
@@ -248,11 +254,11 @@ def run_moe_prune(request: dict[str, Any]) -> dict[str, Any]:
         moe_prune=parse_moe_prune_stdout(
             stdout,
             original_model=model_path,
-            pruned_model=output_path,
+            pruned_model=str(output_path),
             threshold=threshold,
         ),
-        artifacts=[{"kind": "checkpoint", "path": str(Path(output_path).resolve())}]
-        if Path(output_path).exists()
+        artifacts=[{"kind": "checkpoint", "path": str(output_path.resolve())}]
+        if output_path.exists()
         else [],
         logs={"stdout": stdout, "stderr": stderr},
     )

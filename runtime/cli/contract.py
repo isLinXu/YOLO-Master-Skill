@@ -129,6 +129,23 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def write_json_artifact(path: Path, payload: Any) -> None:
+    """Atomically write a redacted JSON artifact owned by the request."""
+    safe_payload = redact_sensitive(json_safe(payload))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".skill_artifact.", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(safe_payload, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def json_safe(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
@@ -354,6 +371,72 @@ def ensure_manifest_dir(request: dict[str, Any]) -> Path:
         raise ValueError("manifest output must remain beneath YOLO-Master runs/agent.")
     target.mkdir(parents=True, exist_ok=True)
     return target
+
+
+def ensure_manifest_child(
+    request: dict[str, Any],
+    value: Any,
+    label: str,
+    default: str | Path,
+) -> Path:
+    """Resolve one output path beneath the current request's manifest directory.
+
+    Task-specific output parameters are intentionally narrower than
+    ``artifacts.project`` and ``artifacts.name``: callers may select a relative
+    child of the current request directory, but may not redirect a task into a
+    different experiment directory. This keeps a request's writes and manifest
+    provenance together.
+    """
+    manifest_dir = ensure_manifest_dir(request).resolve()
+    configured = Path(default) if value in (None, "") else Path(str(value))
+    if configured.is_absolute():
+        raise ValueError(
+            f"`{label}` must be a relative path beneath this request's artifact directory. "
+            "Select the experiment directory with `artifacts.project` and `artifacts.name`."
+        )
+    candidate = (manifest_dir / configured).resolve()
+    if not _is_relative_to(candidate, manifest_dir):
+        raise ValueError(
+            f"`{label}` must resolve beneath this request's artifact directory. "
+            "Select the experiment directory with `artifacts.project` and `artifacts.name`."
+        )
+    return candidate
+
+
+def inject_manifest_output_params(
+    request: dict[str, Any], params: dict[str, Any]
+) -> dict[str, Any]:
+    """Inject the sole output location accepted by Ultralytics executors."""
+    reserved = {"project", "name", "save_dir"} & set(params)
+    if reserved:
+        names = ", ".join(f"`params.{name}`" for name in sorted(reserved))
+        raise ValueError(
+            f"{names} {'is' if len(reserved) == 1 else 'are'} agent-controlled output paths. "
+            "Use `artifacts.project` and `artifacts.name` instead."
+        )
+    manifest_dir = ensure_manifest_dir(request)
+    return {
+        **params,
+        "project": str(manifest_dir.parent),
+        "name": manifest_dir.name,
+        "exist_ok": True,
+    }
+
+
+def ensure_path_within(
+    value: Any, label: str, root: Path, *, relative_to: Path = REPO_ROOT
+) -> Path:
+    """Resolve a readable path while restricting it to a trusted root."""
+    configured = Path(str(value)).expanduser()
+    candidate = (
+        configured.resolve()
+        if configured.is_absolute()
+        else (relative_to / configured).resolve()
+    )
+    resolved_root = root.resolve()
+    if not _is_relative_to(candidate, resolved_root):
+        raise ValueError(f"`{label}` must resolve beneath {resolved_root}.")
+    return candidate
 
 
 def write_manifest(request: dict[str, Any], payload: dict[str, Any]) -> Path:

@@ -28,6 +28,12 @@ python -m pip install -e "$YOLO_MASTER_ROOT"
 The dispatcher uses the framework's editable install and its `yolo` CLI. It writes normal experiment artifacts to the
 YOLO-Master checkout under `runs/agent/`; local Skill logs are ignored under `logs/`.
 
+Artifact routing is request-scoped. Select an experiment with `artifacts.project` and `artifacts.name`; the runtime
+rejects `params.project`, `params.name`, and `params.save_dir` so model executors cannot redirect outputs. Task-local
+output values must be relative children of that experiment directory. `yolo.export` is the one exception: its
+`params.name` remains available for exporter target names such as `rk3588`, while the exported file is still derived
+from a request-local staged model.
+
 ## Run
 
 Use the structured dispatcher from this repository:

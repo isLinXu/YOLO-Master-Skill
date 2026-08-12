@@ -90,6 +90,14 @@ MULTIMODAL_EVALUATE_PARAM_KEYS = {
     "report_name",
 }
 
+_OUTPUT_PATH_PARAM_KEYS = {
+    "crop_dir",
+    "output",
+    "output_dir",
+    "output_path",
+    "report_name",
+}
+
 
 def _sha256_file(path: Path) -> str:
     """Return the SHA-256 digest for a local profile YAML."""
@@ -215,6 +223,24 @@ def normalize_value(value: Any) -> Any:
     return value
 
 
+def restore_output_path_values(raw: Any, normalized: Any) -> Any:
+    """Preserve task-local output values for request-directory resolution later."""
+    if isinstance(raw, dict) and isinstance(normalized, dict):
+        restored = dict(normalized)
+        for key, raw_value in raw.items():
+            if key in _OUTPUT_PATH_PARAM_KEYS:
+                restored[key] = deepcopy(raw_value)
+            elif key in restored:
+                restored[key] = restore_output_path_values(raw_value, restored[key])
+        return restored
+    if isinstance(raw, list) and isinstance(normalized, list):
+        return [
+            restore_output_path_values(raw_value, normalized_value)
+            for raw_value, normalized_value in zip(raw, normalized)
+        ]
+    return normalized
+
+
 def normalize_request(request: dict[str, Any]) -> dict[str, Any]:
     request = deepcopy(request)
     existing_profile = request.pop("profile", None)
@@ -230,8 +256,30 @@ def normalize_request(request: dict[str, Any]) -> dict[str, Any]:
     )
     if profile is not None:
         request["profile"] = profile
+    raw_inputs = deepcopy(request["inputs"])
+    raw_params = deepcopy(request["params"])
     request["inputs"] = normalize_value(request["inputs"])
     request["params"] = normalize_value(request["params"])
+    request["params"] = restore_output_path_values(raw_params, request["params"])
+    reserved_output_params = {"project", "name", "save_dir"} & set(request["params"])
+    # Exporter uses `name` for target architecture selection (for example RKNN/QNN/Hailo),
+    # while its outputs are derived from the request-local staged model path.
+    if request.get("skill") == "yolo.export":
+        reserved_output_params.discard("name")
+    if reserved_output_params:
+        names = ", ".join(f"`params.{name}`" for name in sorted(reserved_output_params))
+        raise ValueError(
+            f"{names} {'is' if len(reserved_output_params) == 1 else 'are'} reserved output controls. "
+            "Use `artifacts.project` and `artifacts.name` instead."
+        )
+    if (
+        request.get("skill") == "yolo.lora.adapters"
+        and (request.get("action") or request["params"].get("action")) == "save"
+    ):
+        if "path" in raw_inputs:
+            request["inputs"]["path"] = raw_inputs["path"]
+        elif "path" in raw_params:
+            request["params"]["path"] = raw_params["path"]
     # Artifact routing is validated by contract.ensure_manifest_dir. Keep its user-facing
     # project/name values relative so the containment check can distinguish them from paths.
     artifacts = dict(request["artifacts"])
